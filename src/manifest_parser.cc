@@ -112,20 +112,8 @@ bool ManifestParser::ParseRule(string* err) {
     if (!ParseLet(&key, &value, err))
       return false;
 
-    if (key == "command") {
-      rule->command_ = value;
-    } else if (key == "depfile") {
-      rule->depfile_ = value;
-    } else if (key == "description") {
-      rule->description_ = value;
-    } else if (key == "generator") {
-      rule->generator_ = true;
-    } else if (key == "restat") {
-      rule->restat_ = true;
-    } else if (key == "rspfile") {
-      rule->rspfile_ = value;
-    } else if (key == "rspfile_content") {
-      rule->rspfile_content_ = value;
+    if (Rule::IsReservedBinding(key)) {
+      rule->AddBinding(key, value);
     } else {
       // Die on other keyvals for now; revisit if we want to add a
       // scope here.
@@ -133,10 +121,13 @@ bool ManifestParser::ParseRule(string* err) {
     }
   }
 
-  if (rule->rspfile_.empty() != rule->rspfile_content_.empty())
-    return lexer_.Error("rspfile and rspfile_content need to be both specified", err);
+  if (rule->bindings_["rspfile"].empty() !=
+      rule->bindings_["rspfile_content"].empty()) {
+    return lexer_.Error("rspfile and rspfile_content need to be "
+                        "both specified", err);
+  }
 
-  if (rule->command_.empty())
+  if (rule->bindings_["command"].empty())
     return lexer_.Error("expected 'command =' line", err);
 
   state_->AddRule(rule);
@@ -250,20 +241,15 @@ bool ManifestParser::ParseEdge(string* err) {
   if (!ExpectToken(Lexer::NEWLINE, err))
     return false;
 
-  // Default to using outer env.
-  BindingEnv* env = env_;
+  // XXX scoped_ptr to handle error case.
+  BindingEnv* env = new BindingEnv(env_);
 
-  // But create and fill a nested env if there are variables in scope.
-  if (lexer_.PeekToken(Lexer::INDENT)) {
-    // XXX scoped_ptr to handle error case.
-    env = new BindingEnv(env_);
-    do {
-      string key;
-      EvalString val;
-      if (!ParseLet(&key, &val, err))
-        return false;
-      env->AddBinding(key, val.Evaluate(env_));
-    } while (lexer_.PeekToken(Lexer::INDENT));
+  while (lexer_.PeekToken(Lexer::INDENT)) {
+    string key;
+    EvalString val;
+    if (!ParseLet(&key, &val, err))
+      return false;
+    env->AddBinding(key, val.Evaluate(env_));
   }
 
   Edge* edge = state_->AddEdge(rule);
