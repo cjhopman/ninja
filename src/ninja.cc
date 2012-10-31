@@ -409,6 +409,8 @@ int ToolTargets(Globals* globals, int argc, char* argv[]) {
 }
 
 int ToolRules(Globals* globals, int argc, char* /* argv */[]) {
+  // XXX I just completely broke this in this patch.
+#if 0
   for (map<string, const Rule*>::iterator i = globals->state->rules_.begin();
        i != globals->state->rules_.end(); ++i) {
     if (i->second->description().empty()) {
@@ -422,6 +424,7 @@ int ToolRules(Globals* globals, int argc, char* /* argv */[]) {
              i->second->description().Serialize().c_str());
     }
   }
+#endif
   return 0;
 }
 
