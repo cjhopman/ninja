@@ -38,7 +38,234 @@
 #include "subprocess.h"
 #include "util.h"
 
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <set>
+#include <cmath>
+
 namespace {
+
+struct Timing {
+  int triggered;
+  int started;
+  int finished;
+};
+std::map<Edge*, std::set<Edge*> > inputs;
+std::map<Edge*, Edge*> triggered;
+std::map<Edge*, Timing> timing;
+int start_time_millis__;
+
+std::map<Edge*, Edge*> merge_map;
+Edge* MergeEdge(Edge* edge) {
+  return merge_map[edge] ? merge_map[edge] : edge;
+}
+
+void ApplyMerge() {
+  std::map<Edge*, std::set<Edge*> > new_inputs;
+  for (std::map<Edge*, std::set<Edge*> >::iterator i = inputs.begin(); i != inputs.end(); ++i) {
+    for (std::set<Edge*>::iterator j = i->second.begin(); j != i->second.end(); ++j) {
+      new_inputs[MergeEdge(i->first)].insert(MergeEdge(*j));
+    }
+  }
+  inputs = new_inputs;
+
+  std::map<Edge*, Timing> new_timing;
+  for (std::map<Edge*, Timing>::iterator i = timing.begin(); i != timing.end(); ++i) {
+    Edge* merge_edge = MergeEdge(i->first);
+    if (merge_edge != i->first) {
+      Timing& merge = timing[merge_edge];
+      merge.triggered = std::min(merge.triggered, i->second.triggered);
+      merge.started = std::min(merge.started, i->second.started);
+      merge.finished = std::max(merge.finished, i->second.finished);
+    }
+    new_timing[merge_edge] = timing[merge_edge];
+  }
+  timing = new_timing;
+
+  std::map<Edge*, Edge*> new_triggered;
+  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
+    if (MergeEdge(i->first) == i->first) {
+      new_triggered[i->first] = MergeEdge(i->second);
+    }
+  }
+  triggered = new_triggered;
+}
+
+void MergeDotEdges() {
+  {
+    std::map<Edge*, Edge*> trigger_merge;
+
+    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+      std::string prefix = "CXX";
+      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
+        Edge*& merge_to = trigger_merge[triggered[i->first]];
+        if (!merge_to) merge_to = i->first;
+        merge_map[i->first] = merge_to;
+      }
+    }
+
+    ApplyMerge();
+  }
+
+  merge_map.clear();
+
+  {
+    std::map<Edge*, Edge*> trigger_merge;
+
+    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+      std::string prefix = "STAMP";
+      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
+        Edge*& merge_to = trigger_merge[triggered[i->first]];
+        if (!merge_to) merge_to = i->first;
+        merge_map[i->first] = merge_to;
+      }
+    }
+
+    ApplyMerge();
+  }
+
+  {
+    std::map<Edge*, Edge*> trigger_merge;
+
+    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+      std::string prefix = "COPY";
+      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
+        Edge*& merge_to = trigger_merge[triggered[i->first]];
+        if (!merge_to) merge_to = i->first;
+        merge_map[i->first] = merge_to;
+      }
+    }
+
+    ApplyMerge();
+  }
+
+  {
+    std::map<Edge*, Edge*> trigger_merge;
+
+    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+      std::string needle = "copy_and_strip";
+      if (i->first->GetDescription().find(needle) != std::string::npos) {
+        Edge*& merge_to = trigger_merge[triggered[i->first]];
+        if (!merge_to) merge_to = i->first;
+        merge_map[i->first] = merge_to;
+      }
+    }
+
+    ApplyMerge();
+  }
+
+  {
+    std::map<Edge*, Edge*> trigger_merge;
+
+    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+      std::string needle = "push_libraries";
+      if (i->first->GetDescription().find(needle) != std::string::npos) {
+        Edge*& merge_to = trigger_merge[triggered[i->first]];
+        if (!merge_to) merge_to = i->first;
+        merge_map[i->first] = merge_to;
+      }
+    }
+
+    ApplyMerge();
+  }
+}
+
+std::string GetDotId(Edge* edge) {
+  char buf[200];
+  sprintf(buf, "XX%p", edge ? edge : (void*)(0xFFFFFFFF));
+  return std::string(buf);
+}
+
+void PrintJson() {
+  std::ofstream out("dot.json");
+
+  out << "{\n";
+
+  out << "  " << "\"edges\": {\n";
+  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+    if (i != timing.begin()) out << ",\n";
+    out << "    " << "\"" << (void*)i->first << "\": {\n";
+    out << "      " << "\"description\": " << i->first->GetDescription() << ",\n";
+    out << "      " << "\"triggered\": " << i->second.triggered << ",\n";
+    out << "      " << "\"started\": " << i->second.started << ",\n";
+    out << "      " << "\"finished\": " << i->second.finished << "\n";
+    out << "    " << "}";
+  }
+  out << "\n";
+  out << "  " << "},\n";
+
+  out << "  " << "\"triggered_by\": {\n";
+  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
+    if (i != triggered.begin()) out << ",\n";
+    out << "    " << "\"" << (void*)i->first << "\": \"" << (void*)i->second << "\"";
+  }
+  out << "\n";
+  out << "  " << "},\n";
+
+  out << "  " << "\"inputs\": {\n";
+  for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
+    out << "    " << "\"" << (void*)i->first << "\": [\n";
+    for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
+      if (j != i->second.begin()) out << ",\n";
+      out << "      " << "\"" << (void*)(*j) << "\"";
+    }
+    out << "\n";
+    out << "    ]\n";
+  }
+  out << "  " << "},\n";
+
+  out << "}\n";
+}
+
+void PrintDotGraph() {
+  PrintJson();
+  MergeDotEdges();
+
+  std::ofstream out("dotfile");
+
+  out << "\n\n";
+  out << "digraph g {\n";
+  out << "  node [shape=rect]\n";
+  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
+    out << "  " << GetDotId(i->second) << " -> " << GetDotId(i->first) << ";\n";
+  }
+
+  out << "\n\n";
+
+  for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
+    out << "  {";
+    bool first = true;
+    for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
+      if (!first) out << ";";
+      out << GetDotId(*j);
+      first = false;
+    }
+    out << "} -> " << GetDotId(i->first) << " [color=\"grey\" pensize=0.3 arrowsize=0.5];\n";
+  }
+
+
+  out << "\n\n";
+
+  int longest_time = 1;
+  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+    longest_time = std::max(longest_time, i->second.finished - i->second.triggered);
+  }
+
+  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+    std::stringstream label;
+    label << i->first->GetDescription() << "\\n";
+    label << "taken: " << i->second.finished - i->second.triggered<< "\\n";
+    label << "triggered: " << i->second.triggered << "\\n";
+    label << "started: " << i->second.started << "\\n";
+    label << "finished: " << i->second.finished << "\\n";
+    double scale = std::sqrt(1 + 100 * (double)(i->second.finished - i->second.triggered) / longest_time);
+    int fontsize = 14.0 * scale;
+    out << "  " << GetDotId(i->first) << "  [label=\"" << label.str() << "\" fontsize=" << fontsize << "];\n";
+  }
+
+  out << "\n}\n";
+}
 
 /// A CommandRunner that doesn't actually run the commands.
 class DryRunCommandRunner : public CommandRunner {
@@ -83,6 +310,7 @@ BuildStatus::BuildStatus(const BuildConfig& config)
       started_edges_(0), finished_edges_(0), total_edges_(0),
       have_blank_line_(true), progress_status_format_(NULL),
       overall_rate_(), current_rate_(config.parallelism) {
+  start_time_millis__ = start_time_millis_;
 #ifndef _WIN32
   const char* term = getenv("TERM");
   smart_terminal_ = isatty(1) && term && string(term) != "dumb";
@@ -131,6 +359,8 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
   *end_time = (int)(now - start_time_millis_);
   running_edges_.erase(i);
 
+  timing[edge].started = *start_time;
+
   if (config_.verbosity == BuildConfig::QUIET)
     return;
 
@@ -171,6 +401,7 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
 }
 
 void BuildStatus::BuildFinished() {
+  PrintDotGraph();
   if (smart_terminal_ && !have_blank_line_)
     printf("\n");
 }
@@ -358,6 +589,7 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
   if (node->dirty() && !want) {
     want = true;
     ++wanted_edges_;
+    timing[edge].triggered = GetTimeMillis() - start_time_millis__;
     if (edge->AllInputsReady())
       ready_.insert(edge);
     if (!edge->is_phony())
@@ -415,15 +647,16 @@ void Plan::EdgeFinished(Edge* edge) {
     --wanted_edges_;
   want_.erase(i);
   edge->outputs_ready_ = true;
+  timing[edge].finished = GetTimeMillis() - start_time_millis__;
 
   // Check off any nodes we were waiting for with this edge.
   for (vector<Node*>::iterator i = edge->outputs_.begin();
        i != edge->outputs_.end(); ++i) {
-    NodeFinished(*i);
+    NodeFinished(*i, edge);
   }
 }
 
-void Plan::NodeFinished(Node* node) {
+void Plan::NodeFinished(Node* node, Edge* edge) {
   // See if we we want any edges from this node.
   for (vector<Edge*>::const_iterator i = node->out_edges().begin();
        i != node->out_edges().end(); ++i) {
@@ -431,8 +664,11 @@ void Plan::NodeFinished(Node* node) {
     if (want_i == want_.end())
       continue;
 
+    inputs[*i].insert(edge);
     // See if the edge is now ready.
     if ((*i)->AllInputsReady()) {
+      triggered[*i] = edge;
+      timing[*i].triggered = GetTimeMillis() - start_time_millis__;
       if (want_i->second) {
         ready_.insert(*i);
       } else {
