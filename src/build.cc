@@ -181,40 +181,46 @@ void PrintJson() {
   std::ofstream out("dot.json");
 
   out << "{\n";
-
-  out << "  " << "\"edges\": {\n";
-  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-    if (i != timing.begin()) out << ",\n";
-    out << "    " << "\"" << (void*)i->first << "\": {\n";
-    out << "      " << "\"description\": " << i->first->GetDescription() << ",\n";
-    out << "      " << "\"triggered\": " << i->second.triggered << ",\n";
-    out << "      " << "\"started\": " << i->second.started << ",\n";
-    out << "      " << "\"finished\": " << i->second.finished << "\n";
-    out << "    " << "}";
-  }
-  out << "\n";
-  out << "  " << "},\n";
-
-  out << "  " << "\"triggered_by\": {\n";
-  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
-    if (i != triggered.begin()) out << ",\n";
-    out << "    " << "\"" << (void*)i->first << "\": \"" << (void*)i->second << "\"";
-  }
-  out << "\n";
-  out << "  " << "},\n";
-
-  out << "  " << "\"inputs\": {\n";
-  for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
-    out << "    " << "\"" << (void*)i->first << "\": [\n";
-    for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
-      if (j != i->second.begin()) out << ",\n";
-      out << "      " << "\"" << (void*)(*j) << "\"";
+  {
+    out << "  " << "\"nodes\": {\n";
+    {
+      for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
+        if (i != timing.begin()) out << ",\n";
+        out << "    " << "\"" << (void*)i->first << "\": {\n";
+        out << "      " << "\"description\": \"" << i->first->GetDescription() << "\",\n";
+        out << "      " << "\"triggered\": " << i->second.triggered << ",\n";
+        out << "      " << "\"started\": " << i->second.started << ",\n";
+        out << "      " << "\"finished\": " << i->second.finished << "\n";
+        out << "    " << "}";
+      }
+      out << "\n";
     }
-    out << "\n";
-    out << "    ]\n";
+    out << "  " << "},\n";
+    out << "  " << "\"triggered_by\": {\n";
+    {
+      for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
+        if (i != triggered.begin()) out << ",\n";
+        out << "    " << "\"" << (void*)i->first << "\": \"" << (void*)i->second << "\"";
+      }
+      out << "\n";
+    }
+    out << "  " << "},\n";
+    out << "  " << "\"inputs\": {\n";
+    {
+      for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
+        if (i != inputs.begin()) out << ",\n";
+        out << "    " << "\"" << (void*)i->first << "\": [\n";
+        for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
+          if (j != i->second.begin()) out << ",\n";
+          out << "      " << "\"" << (void*)(*j) << "\"";
+        }
+        out << "\n";
+        out << "    ]";
+      }
+      out << "\n";
+    }
+    out << "  " << "}\n";
   }
-  out << "  " << "},\n";
-
   out << "}\n";
 }
 
