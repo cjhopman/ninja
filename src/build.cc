@@ -56,126 +56,6 @@ std::map<Edge*, Edge*> triggered;
 std::map<Edge*, Timing> timing;
 int start_time_millis__;
 
-std::map<Edge*, Edge*> merge_map;
-Edge* MergeEdge(Edge* edge) {
-  return merge_map[edge] ? merge_map[edge] : edge;
-}
-
-void ApplyMerge() {
-  std::map<Edge*, std::set<Edge*> > new_inputs;
-  for (std::map<Edge*, std::set<Edge*> >::iterator i = inputs.begin(); i != inputs.end(); ++i) {
-    for (std::set<Edge*>::iterator j = i->second.begin(); j != i->second.end(); ++j) {
-      new_inputs[MergeEdge(i->first)].insert(MergeEdge(*j));
-    }
-  }
-  inputs = new_inputs;
-
-  std::map<Edge*, Timing> new_timing;
-  for (std::map<Edge*, Timing>::iterator i = timing.begin(); i != timing.end(); ++i) {
-    Edge* merge_edge = MergeEdge(i->first);
-    if (merge_edge != i->first) {
-      Timing& merge = timing[merge_edge];
-      merge.triggered = std::min(merge.triggered, i->second.triggered);
-      merge.started = std::min(merge.started, i->second.started);
-      merge.finished = std::max(merge.finished, i->second.finished);
-    }
-    new_timing[merge_edge] = timing[merge_edge];
-  }
-  timing = new_timing;
-
-  std::map<Edge*, Edge*> new_triggered;
-  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
-    if (MergeEdge(i->first) == i->first) {
-      new_triggered[i->first] = MergeEdge(i->second);
-    }
-  }
-  triggered = new_triggered;
-}
-
-void MergeDotEdges() {
-  {
-    std::map<Edge*, Edge*> trigger_merge;
-
-    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-      std::string prefix = "CXX";
-      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
-        Edge*& merge_to = trigger_merge[triggered[i->first]];
-        if (!merge_to) merge_to = i->first;
-        merge_map[i->first] = merge_to;
-      }
-    }
-
-    ApplyMerge();
-  }
-
-  merge_map.clear();
-
-  {
-    std::map<Edge*, Edge*> trigger_merge;
-
-    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-      std::string prefix = "STAMP";
-      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
-        Edge*& merge_to = trigger_merge[triggered[i->first]];
-        if (!merge_to) merge_to = i->first;
-        merge_map[i->first] = merge_to;
-      }
-    }
-
-    ApplyMerge();
-  }
-
-  {
-    std::map<Edge*, Edge*> trigger_merge;
-
-    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-      std::string prefix = "COPY";
-      if (i->first->GetDescription().substr(0, prefix.size()) == prefix) {
-        Edge*& merge_to = trigger_merge[triggered[i->first]];
-        if (!merge_to) merge_to = i->first;
-        merge_map[i->first] = merge_to;
-      }
-    }
-
-    ApplyMerge();
-  }
-
-  {
-    std::map<Edge*, Edge*> trigger_merge;
-
-    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-      std::string needle = "copy_and_strip";
-      if (i->first->GetDescription().find(needle) != std::string::npos) {
-        Edge*& merge_to = trigger_merge[triggered[i->first]];
-        if (!merge_to) merge_to = i->first;
-        merge_map[i->first] = merge_to;
-      }
-    }
-
-    ApplyMerge();
-  }
-
-  {
-    std::map<Edge*, Edge*> trigger_merge;
-
-    for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-      std::string needle = "push_libraries";
-      if (i->first->GetDescription().find(needle) != std::string::npos) {
-        Edge*& merge_to = trigger_merge[triggered[i->first]];
-        if (!merge_to) merge_to = i->first;
-        merge_map[i->first] = merge_to;
-      }
-    }
-
-    ApplyMerge();
-  }
-}
-
-std::string GetDotId(Edge* edge) {
-  char buf[200];
-  sprintf(buf, "XX%p", edge ? edge : (void*)(0xFFFFFFFF));
-  return std::string(buf);
-}
 
 void PrintJson() {
   std::ofstream out("dot.json");
@@ -224,54 +104,6 @@ void PrintJson() {
   out << "}\n";
 }
 
-void PrintDotGraph() {
-  PrintJson();
-  MergeDotEdges();
-
-  std::ofstream out("dotfile");
-
-  out << "\n\n";
-  out << "digraph g {\n";
-  out << "  node [shape=rect]\n";
-  for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
-    out << "  " << GetDotId(i->second) << " -> " << GetDotId(i->first) << ";\n";
-  }
-
-  out << "\n\n";
-
-  for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
-    out << "  {";
-    bool first = true;
-    for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
-      if (!first) out << ";";
-      out << GetDotId(*j);
-      first = false;
-    }
-    out << "} -> " << GetDotId(i->first) << " [color=\"grey\" pensize=0.3 arrowsize=0.5];\n";
-  }
-
-
-  out << "\n\n";
-
-  int longest_time = 1;
-  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-    longest_time = std::max(longest_time, i->second.finished - i->second.triggered);
-  }
-
-  for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-    std::stringstream label;
-    label << i->first->GetDescription() << "\\n";
-    label << "taken: " << i->second.finished - i->second.triggered<< "\\n";
-    label << "triggered: " << i->second.triggered << "\\n";
-    label << "started: " << i->second.started << "\\n";
-    label << "finished: " << i->second.finished << "\\n";
-    double scale = std::sqrt(1 + 100 * (double)(i->second.finished - i->second.triggered) / longest_time);
-    int fontsize = 14.0 * scale;
-    out << "  " << GetDotId(i->first) << "  [label=\"" << label.str() << "\" fontsize=" << fontsize << "];\n";
-  }
-
-  out << "\n}\n";
-}
 
 /// A CommandRunner that doesn't actually run the commands.
 class DryRunCommandRunner : public CommandRunner {
@@ -407,7 +239,7 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
 }
 
 void BuildStatus::BuildFinished() {
-  PrintDotGraph();
+  PrintJson();
   if (smart_terminal_ && !have_blank_line_)
     printf("\n");
 }
