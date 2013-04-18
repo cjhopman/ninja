@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -31,6 +32,7 @@
 #include "browse.h"
 #include "build.h"
 #include "build_log.h"
+#include "deps_log.h"
 #include "clean.h"
 #include "disk_interface.h"
 #include "edit_distance.h"
@@ -41,15 +43,12 @@
 #include "metrics.h"
 #include "state.h"
 #include "util.h"
+#include "version.h"
 
 // Defined in msvc_helper_main-win32.cc.
 int MSVCHelperMain(int argc, char** argv);
 
 namespace {
-
-/// The version number of the current Ninja release.  This will always
-/// be "git" on trunk.
-const char* kVersion = "git";
 
 /// Global information passed into subtools.
 struct Globals {
@@ -109,7 +108,7 @@ void Usage(const BuildConfig& config) {
 "  -C DIR   change to DIR before doing anything else\n"
 "  -f FILE  specify input build file [default=build.ninja]\n"
 "\n"
-"  -j N     run N jobs in parallel [default=%d]\n"
+"  -j N     run N jobs in parallel [default=%d, derived from CPUs available]\n"
 "  -l N     do not start new jobs if the load average is greater than N\n"
 #ifdef _WIN32
 "           (not yet implemented on Windows)\n"
@@ -121,7 +120,7 @@ void Usage(const BuildConfig& config) {
 "  -d MODE  enable debugging (use -d list to list modes)\n"
 "  -t TOOL  run a subtool (use -t list to list subtools)\n"
 "    terminates toplevel options; further flags are passed to the tool\n",
-          kVersion, config.parallelism);
+          kNinjaVersion, config.parallelism);
 }
 
 /// Choose a default value for the -j (parallelism) flag.
@@ -168,6 +167,50 @@ bool RebuildManifest(Builder* builder, const char* input_file, string* err) {
   return node->dirty();
 }
 
+Node* CollectTarget(State* state, const char* cpath, string* err) {
+  string path = cpath;
+  if (!CanonicalizePath(&path, err))
+    return NULL;
+
+  // Special syntax: "foo.cc^" means "the first output of foo.cc".
+  bool first_dependent = false;
+  if (!path.empty() && path[path.size() - 1] == '^') {
+    path.resize(path.size() - 1);
+    first_dependent = true;
+  }
+
+  Node* node = state->LookupNode(path);
+  if (node) {
+    if (first_dependent) {
+      if (node->out_edges().empty()) {
+        *err = "'" + path + "' has no out edge";
+        return NULL;
+      }
+      Edge* edge = node->out_edges()[0];
+      if (edge->outputs_.empty()) {
+        edge->Dump();
+        Fatal("edge has no outputs");
+      }
+      node = edge->outputs_[0];
+    }
+    return node;
+  } else {
+    *err = "unknown target '" + path + "'";
+
+    if (path == "clean") {
+      *err += ", did you mean 'ninja -t clean'?";
+    } else if (path == "help") {
+      *err += ", did you mean 'ninja -h'?";
+    } else {
+      Node* suggestion = state->SpellcheckNode(path);
+      if (suggestion) {
+        *err += ", did you mean '" + suggestion->path() + "'?";
+      }
+    }
+    return NULL;
+  }
+}
+
 bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
                             vector<Node*>* targets, string* err) {
   if (argc == 0) {
@@ -176,47 +219,10 @@ bool CollectTargetsFromArgs(State* state, int argc, char* argv[],
   }
 
   for (int i = 0; i < argc; ++i) {
-    string path = argv[i];
-    if (!CanonicalizePath(&path, err))
+    Node* node = CollectTarget(state, argv[i], err);
+    if (node == NULL)
       return false;
-
-    // Special syntax: "foo.cc^" means "the first output of foo.cc".
-    bool first_dependent = false;
-    if (!path.empty() && path[path.size() - 1] == '^') {
-      path.resize(path.size() - 1);
-      first_dependent = true;
-    }
-
-    Node* node = state->LookupNode(path);
-    if (node) {
-      if (first_dependent) {
-        if (node->out_edges().empty()) {
-          *err = "'" + path + "' has no out edge";
-          return false;
-        }
-        Edge* edge = node->out_edges()[0];
-        if (edge->outputs_.empty()) {
-          edge->Dump();
-          Fatal("edge has no outputs");
-        }
-        node = edge->outputs_[0];
-      }
-      targets->push_back(node);
-    } else {
-      *err = "unknown target '" + path + "'";
-
-      if (path == "clean") {
-        *err += ", did you mean 'ninja -t clean'?";
-      } else if (path == "help") {
-        *err += ", did you mean 'ninja -h'?";
-      } else {
-        Node* suggestion = state->SpellcheckNode(path);
-        if (suggestion) {
-          *err += ", did you mean '" + suggestion->path() + "'?";
-        }
-      }
-      return false;
-    }
+    targets->push_back(node);
   }
   return true;
 }
@@ -244,19 +250,14 @@ int ToolQuery(Globals* globals, int argc, char* argv[]) {
     return 1;
   }
   for (int i = 0; i < argc; ++i) {
-    Node* node = globals->state->LookupNode(argv[i]);
+    string err;
+    Node* node = CollectTarget(globals->state, argv[i], &err);
     if (!node) {
-      Node* suggestion = globals->state->SpellcheckNode(argv[i]);
-      if (suggestion) {
-        printf("%s unknown, did you mean %s?\n",
-               argv[i], suggestion->path().c_str());
-      } else {
-        printf("%s unknown\n", argv[i]);
-      }
+      Error("%s", err.c_str());
       return 1;
     }
 
-    printf("%s:\n", argv[i]);
+    printf("%s:\n", node->path().c_str());
     if (Edge* edge = node->in_edge()) {
       printf("  input: %s\n", edge->rule_->name().c_str());
       for (int in = 0; in < (int)edge->inputs_.size(); in++) {
@@ -408,23 +409,6 @@ int ToolTargets(Globals* globals, int argc, char* argv[]) {
   }
 }
 
-int ToolRules(Globals* globals, int argc, char* /* argv */[]) {
-  for (map<string, const Rule*>::iterator i = globals->state->rules_.begin();
-       i != globals->state->rules_.end(); ++i) {
-    if (i->second->description().empty()) {
-      printf("%s\n", i->first.c_str());
-    } else {
-      printf("%s: %s\n",
-             i->first.c_str(),
-             // XXX I changed it such that we don't have an easy way
-             // to get the source text anymore, so this output is
-             // unsatisfactory.  How useful is this command, anyway?
-             i->second->description().Serialize().c_str());
-    }
-  }
-  return 0;
-}
-
 void PrintCommands(Edge* edge, set<Edge*>* seen) {
   if (!edge)
     return;
@@ -503,6 +487,49 @@ int ToolClean(Globals* globals, int argc, char* argv[]) {
   }
 }
 
+void EncodeJSONString(const char *str) {
+  while (*str) {
+    if (*str == '"' || *str == '\\')
+      putchar('\\');
+    putchar(*str);
+    str++;
+  }
+}
+
+int ToolCompilationDatabase(Globals* globals, int argc, char* argv[]) {
+  bool first = true;
+  char cwd[PATH_MAX];
+
+  if (!getcwd(cwd, PATH_MAX)) {
+    Error("cannot determine working directory: %s", strerror(errno));
+    return 1;
+  }
+
+  putchar('[');
+  for (vector<Edge*>::iterator e = globals->state->edges_.begin();
+       e != globals->state->edges_.end(); ++e) {
+    for (int i = 0; i != argc; ++i) {
+      if ((*e)->rule_->name() == argv[i]) {
+        if (!first)
+          putchar(',');
+
+        printf("\n  {\n    \"directory\": \"");
+        EncodeJSONString(cwd);
+        printf("\",\n    \"command\": \"");
+        EncodeJSONString((*e)->EvaluateCommand().c_str());
+        printf("\",\n    \"file\": \"");
+        EncodeJSONString((*e)->inputs_[0]->path().c_str());
+        printf("\"\n  }");
+
+        first = false;
+      }
+    }
+  }
+
+  puts("\n]");
+  return 0;
+}
+
 int ToolUrtle(Globals* globals, int argc, char** argv) {
   // RLE encoded.
   const char* urtle =
@@ -549,10 +576,10 @@ int ChooseTool(const string& tool_name, const Tool** tool_out) {
       Tool::RUN_AFTER_LOAD, ToolGraph },
     { "query", "show inputs/outputs for a path",
       Tool::RUN_AFTER_LOAD, ToolQuery },
-    { "rules",    "list all rules",
-      Tool::RUN_AFTER_LOAD, ToolRules },
     { "targets",  "list targets by their rule or depth in the DAG",
       Tool::RUN_AFTER_LOAD, ToolTargets },
+    { "compdb",  "dump JSON compilation database to stdout",
+      Tool::RUN_AFTER_LOAD, ToolCompilationDatabase },
     { "urtle", NULL,
       Tool::RUN_AFTER_FLAGS, ToolUrtle },
     { NULL, NULL, Tool::RUN_AFTER_FLAGS, NULL }
@@ -603,25 +630,25 @@ bool DebugEnable(const string& name, Globals* globals) {
     g_explaining = true;
     return true;
   } else {
-    printf("ninja: unknown debug setting '%s'\n", name.c_str());
+    const char* suggestion =
+        SpellcheckString(name, "stats", "explain", NULL);
+    if (suggestion) {
+      Error("unknown debug setting '%s', did you mean '%s'?",
+            name.c_str(), suggestion);
+    } else {
+      Error("unknown debug setting '%s'", name.c_str());
+    }
     return false;
   }
 }
 
-bool OpenLog(BuildLog* build_log, Globals* globals,
-             DiskInterface* disk_interface) {
-  const string build_dir =
-      globals->state->bindings_.LookupVariable("builddir");
-  const char* kLogPath = ".ninja_log";
-  string log_path = kLogPath;
-  if (!build_dir.empty()) {
-    log_path = build_dir + "/" + kLogPath;
-    if (!disk_interface->MakeDirs(log_path) && errno != EEXIST) {
-      Error("creating build directory %s: %s",
-            build_dir.c_str(), strerror(errno));
-      return false;
-    }
-  }
+/// Open the build log.
+/// @return false on error.
+bool OpenBuildLog(BuildLog* build_log, const string& build_dir,
+                  Globals* globals, DiskInterface* disk_interface) {
+  string log_path = ".ninja_log";
+  if (!build_dir.empty())
+    log_path = build_dir + "/" + log_path;
 
   string err;
   if (!build_log->Load(log_path, &err)) {
@@ -643,6 +670,36 @@ bool OpenLog(BuildLog* build_log, Globals* globals,
 
   return true;
 }
+
+/// Open the deps log: load it, then open for writing.
+/// @return false on error.
+bool OpenDepsLog(DepsLog* deps_log, const string& build_dir,
+                 Globals* globals, DiskInterface* disk_interface) {
+  string path = ".ninja_deps";
+  if (!build_dir.empty())
+    path = build_dir + "/" + path;
+
+  string err;
+  if (!deps_log->Load(path, globals->state, &err)) {
+    Error("loading deps log %s: %s", path.c_str(), err.c_str());
+    return false;
+  }
+  if (!err.empty()) {
+    // Hack: Load() can return a warning via err by returning true.
+    Warning("%s", err.c_str());
+    err.clear();
+  }
+
+  if (!globals->config->dry_run) {
+    if (!deps_log->OpenForWrite(path, &err)) {
+      Error("opening deps log: %s", err.c_str());
+      return false;
+    }
+  }
+
+  return true;
+}
+
 
 /// Dump the output requested by '-d stats'.
 void DumpMetrics(Globals* globals) {
@@ -682,6 +739,9 @@ int RunBuild(Builder* builder, int argc, char** argv) {
 
   if (!builder->Build(&err)) {
     printf("ninja: build stopped: %s.\n", err.c_str());
+    if (err.find("interrupted by user") != string::npos) {
+    	return 2;
+    }
     return 1;
   }
 
@@ -786,7 +846,7 @@ int NinjaMain(int argc, char** argv) {
         working_dir = optarg;
         break;
       case OPT_VERSION:
-        printf("%s\n", kVersion);
+        printf("%s\n", kNinjaVersion);
         return 0;
       case 'h':
       default:
@@ -825,7 +885,6 @@ int NinjaMain(int argc, char** argv) {
   bool rebuilt_manifest = false;
 
 reload:
-  RealDiskInterface disk_interface;
   RealFileReader file_reader;
   ManifestParser parser(globals.state, &file_reader);
   string err;
@@ -837,13 +896,30 @@ reload:
   if (tool && tool->when == Tool::RUN_AFTER_LOAD)
     return tool->func(&globals, argc, argv);
 
+  RealDiskInterface disk_interface;
+
+  // Create the build dir if it doesn't exist.
+  const string build_dir = globals.state->bindings_.LookupVariable("builddir");
+  if (!build_dir.empty() && !config.dry_run) {
+    if (!disk_interface.MakeDirs(build_dir + "/.") &&
+        errno != EEXIST) {
+      Error("creating build directory %s: %s",
+            build_dir.c_str(), strerror(errno));
+      return 1;
+    }
+  }
+
   BuildLog build_log;
-  if (!OpenLog(&build_log, &globals, &disk_interface))
+  if (!OpenBuildLog(&build_log, build_dir, &globals, &disk_interface))
+    return 1;
+
+  DepsLog deps_log;
+  if (!OpenDepsLog(&deps_log, build_dir, &globals, &disk_interface))
     return 1;
 
   if (!rebuilt_manifest) { // Don't get caught in an infinite loop by a rebuild
                            // target that is never up to date.
-    Builder manifest_builder(globals.state, config, &build_log,
+    Builder manifest_builder(globals.state, config, &build_log, &deps_log,
                              &disk_interface);
     if (RebuildManifest(&manifest_builder, input_file, &err)) {
       rebuilt_manifest = true;
@@ -855,7 +931,8 @@ reload:
     }
   }
 
-  Builder builder(globals.state, config, &build_log, &disk_interface);
+  Builder builder(globals.state, config, &build_log, &deps_log,
+                  &disk_interface);
   int result = RunBuild(&builder, argc, argv);
   if (g_metrics)
     DumpMetrics(&globals);

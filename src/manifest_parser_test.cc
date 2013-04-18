@@ -61,7 +61,8 @@ TEST_F(ParserTest, Rules) {
   ASSERT_EQ(3u, state.rules_.size());
   const Rule* rule = state.rules_.begin()->second;
   EXPECT_EQ("cat", rule->name());
-  EXPECT_EQ("[cat ][$in][ > ][$out]", rule->command().Serialize());
+  EXPECT_EQ("[cat ][$in][ > ][$out]",
+            rule->GetBinding("command")->Serialize());
 }
 
 TEST_F(ParserTest, RuleAttributes) {
@@ -70,6 +71,7 @@ TEST_F(ParserTest, RuleAttributes) {
 "rule cat\n"
 "  command = a\n"
 "  depfile = a\n"
+"  deps = a\n"
 "  description = a\n"
 "  generator = a\n"
 "  restat = a\n"
@@ -92,8 +94,9 @@ TEST_F(ParserTest, IgnoreIndentedComments) {
   ASSERT_EQ(2u, state.rules_.size());
   const Rule* rule = state.rules_.begin()->second;
   EXPECT_EQ("cat", rule->name());
-  EXPECT_TRUE(rule->restat());
-  EXPECT_FALSE(rule->generator());
+  Edge* edge = state.GetNode("result")->in_edge();
+  EXPECT_TRUE(edge->GetBindingBool("restat"));
+  EXPECT_FALSE(edge->GetBindingBool("generator"));
 }
 
 TEST_F(ParserTest, IgnoreIndentedBlankLines) {
@@ -124,9 +127,10 @@ TEST_F(ParserTest, ResponseFiles) {
   ASSERT_EQ(2u, state.rules_.size());
   const Rule* rule = state.rules_.begin()->second;
   EXPECT_EQ("cat_rsp", rule->name());
-  EXPECT_EQ("[cat ][$rspfile][ > ][$out]", rule->command().Serialize());
-  EXPECT_EQ("[$rspfile]", rule->rspfile().Serialize());
-  EXPECT_EQ("[$in]", rule->rspfile_content().Serialize());
+  EXPECT_EQ("[cat ][$rspfile][ > ][$out]",
+            rule->GetBinding("command")->Serialize());
+  EXPECT_EQ("[$rspfile]", rule->GetBinding("rspfile")->Serialize());
+  EXPECT_EQ("[$in]", rule->GetBinding("rspfile_content")->Serialize());
 }
 
 TEST_F(ParserTest, InNewline) {
@@ -140,7 +144,8 @@ TEST_F(ParserTest, InNewline) {
   ASSERT_EQ(2u, state.rules_.size());
   const Rule* rule = state.rules_.begin()->second;
   EXPECT_EQ("cat_rsp", rule->name());
-  EXPECT_EQ("[cat ][$in_newline][ > ][$out]", rule->command().Serialize());
+  EXPECT_EQ("[cat ][$in_newline][ > ][$out]",
+            rule->GetBinding("command")->Serialize());
 
   Edge* edge = state.edges_[0];
   EXPECT_EQ("cat in\nin2 > out", edge->EvaluateCommand());
@@ -200,7 +205,7 @@ TEST_F(ParserTest, Continuation) {
   ASSERT_EQ(2u, state.rules_.size());
   const Rule* rule = state.rules_.begin()->second;
   EXPECT_EQ("link", rule->name());
-  EXPECT_EQ("[foo bar baz]", rule->command().Serialize());
+  EXPECT_EQ("[foo bar baz]", rule->GetBinding("command")->Serialize());
 }
 
 TEST_F(ParserTest, Backslash) {
@@ -291,7 +296,8 @@ TEST_F(ParserTest, ReservedWords) {
 
 TEST_F(ParserTest, Errors) {
   {
-    ManifestParser parser(NULL, NULL);
+    State state;
+    ManifestParser parser(&state, NULL);
     string err;
     EXPECT_FALSE(parser.ParseTest("foobar", &err));
     EXPECT_EQ("input:1: expected '=', got eof\n"
@@ -301,7 +307,8 @@ TEST_F(ParserTest, Errors) {
   }
 
   {
-    ManifestParser parser(NULL, NULL);
+    State state;
+    ManifestParser parser(&state, NULL);
     string err;
     EXPECT_FALSE(parser.ParseTest("x 3", &err));
     EXPECT_EQ("input:1: expected '=', got identifier\n"
@@ -311,7 +318,8 @@ TEST_F(ParserTest, Errors) {
   }
 
   {
-    ManifestParser parser(NULL, NULL);
+    State state;
+    ManifestParser parser(&state, NULL);
     string err;
     EXPECT_FALSE(parser.ParseTest("x = 3", &err));
     EXPECT_EQ("input:1: unexpected EOF\n"
@@ -590,6 +598,17 @@ TEST_F(ParserTest, MultipleOutputs) {
                                "build a.o b.o: cc c.cc\n",
                                &err));
   EXPECT_EQ("", err);
+}
+
+TEST_F(ParserTest, MultipleOutputsWithDeps) {
+  State state;
+  ManifestParser parser(&state, NULL);
+  string err;
+  EXPECT_FALSE(parser.ParseTest("rule cc\n  command = foo\n  deps = gcc\n"
+                               "build a.o b.o: cc c.cc\n",
+                               &err));
+  EXPECT_EQ("input:5: multiple outputs aren't (yet?) supported by depslog; "
+            "bring this up on the mailing list if it affects you\n", err);
 }
 
 TEST_F(ParserTest, SubNinja) {

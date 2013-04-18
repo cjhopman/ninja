@@ -22,8 +22,13 @@ using namespace std;
 #include "eval_env.h"
 #include "timestamp.h"
 
+struct BuildLog;
 struct DiskInterface;
+struct DepsLog;
 struct Edge;
+struct Node;
+struct Pool;
+struct State;
 
 /// Information about a node in the dependency graph: the file, whether
 /// it's dirty, mtime, etc.
@@ -32,7 +37,8 @@ struct Node {
       : path_(path),
         mtime_(-1),
         dirty_(false),
-        in_edge_(NULL) {}
+        in_edge_(NULL),
+        id_(-1) {}
 
   /// Return true if the file exists (mtime_ got a value).
   bool Stat(DiskInterface* disk_interface);
@@ -74,6 +80,9 @@ struct Node {
   Edge* in_edge() const { return in_edge_; }
   void set_in_edge(Edge* edge) { in_edge_ = edge; }
 
+  int id() const { return id_; }
+  void set_id(int id) { id_ = id; }
+
   const vector<Edge*>& out_edges() const { return out_edges_; }
   void AddOutEdge(Edge* edge) { out_edges_.push_back(edge); }
 
@@ -98,46 +107,31 @@ private:
 
   /// All Edges that use this Node as an input.
   vector<Edge*> out_edges_;
+
+  /// A dense integer id for the node, assigned and used by DepsLog.
+  int id_;
 };
 
 /// An invokable build command and associated metadata (description, etc.).
 struct Rule {
-  explicit Rule(const string& name)
-      : name_(name), generator_(false), restat_(false) {}
+  explicit Rule(const string& name) : name_(name) {}
 
   const string& name() const { return name_; }
 
-  bool generator() const { return generator_; }
-  bool restat() const { return restat_; }
+  typedef map<string, EvalString> Bindings;
+  void AddBinding(const string& key, const EvalString& val);
 
-  const EvalString& command() const { return command_; }
-  const EvalString& description() const { return description_; }
-  const EvalString& depfile() const { return depfile_; }
-  const EvalString& rspfile() const { return rspfile_; }
-  const EvalString& rspfile_content() const { return rspfile_content_; }
+  static bool IsReservedBinding(const string& var);
 
-  /// Used by a test.
-  void set_command(const EvalString& command) { command_ = command; }
+  const EvalString* GetBinding(const string& key) const;
 
  private:
   // Allow the parsers to reach into this object and fill out its fields.
   friend struct ManifestParser;
 
   string name_;
-
-  bool generator_;
-  bool restat_;
-
-  EvalString command_;
-  EvalString description_;
-  EvalString depfile_;
-  EvalString rspfile_;
-  EvalString rspfile_content_;
+  map<string, EvalString> bindings_;
 };
-
-struct BuildLog;
-struct Node;
-struct State;
 
 /// An edge in the dependency graph; links between Nodes using Rules.
 struct Edge {
@@ -150,41 +144,33 @@ struct Edge {
   /// Expand all variables in a command and return it as a string.
   /// If incl_rsp_file is enabled, the string will also contain the
   /// full contents of a response file (if applicable)
-  string EvaluateCommand(bool incl_rsp_file = false);  // XXX move to env, take env ptr
-  string EvaluateDepFile();
-  string GetDescription();
+  string EvaluateCommand(bool incl_rsp_file = false);
 
-  /// Does the edge use a response file?
-  bool HasRspFile();
-
-  /// Get the path to the response file
-  string GetRspFile();
-
-  /// Get the contents of the response file
-  string GetRspFileContent();
+  string GetBinding(const string& key);
+  bool GetBindingBool(const string& key);
 
   void Dump(const char* prefix="") const;
 
   const Rule* rule_;
+  Pool* pool_;
   vector<Node*> inputs_;
   vector<Node*> outputs_;
-  Env* env_;
+  BindingEnv* env_;
   bool outputs_ready_;
 
   const Rule& rule() const { return *rule_; }
+  Pool* pool() const { return pool_; }
+  int weight() const { return 1; }
   bool outputs_ready() const { return outputs_ready_; }
 
-  // XXX There are three types of inputs.
+  // There are three types of inputs.
   // 1) explicit deps, which show up as $in on the command line;
   // 2) implicit deps, which the target depends on implicitly (e.g. C headers),
   //                   and changes in them cause the target to rebuild;
   // 3) order-only deps, which are needed before the target builds but which
   //                     don't cause the target to rebuild.
-  // Currently we stuff all of these into inputs_ and keep counts of #2 and #3
-  // when we need to compute subsets.  This is suboptimal; should think of a
-  // better representation.  (Could make each pointer into a pair of a pointer
-  // and a type of input, or if memory matters could use the low bits of the
-  // pointer...)
+  // These are stored in inputs_ in that order, and we keep counts of
+  // #2 and #3 when we need to access the various subsets.
   int implicit_deps_;
   int order_only_deps_;
   bool is_implicit(size_t index) {
@@ -199,13 +185,54 @@ struct Edge {
 };
 
 
+/// ImplicitDepLoader loads implicit dependencies, as referenced via the
+/// "depfile" attribute in build files.
+struct ImplicitDepLoader {
+  ImplicitDepLoader(State* state, DepsLog* deps_log,
+                    DiskInterface* disk_interface)
+      : state_(state), disk_interface_(disk_interface), deps_log_(deps_log) {}
+
+  /// Load implicit dependencies for \a edge.  May fill in \a mtime with
+  /// the timestamp of the loaded information.
+  /// @return false on error (without filling \a err if info is just missing).
+  bool LoadDeps(Edge* edge, TimeStamp* mtime, string* err);
+
+  DepsLog* deps_log() const {
+    return deps_log_;
+  }
+
+ private:
+  /// Load implicit dependencies for \a edge from a depfile attribute.
+  /// @return false on error (without filling \a err if info is just missing).
+  bool LoadDepFile(Edge* edge, const string& path, string* err);
+
+  /// Load implicit dependencies for \a edge from the DepsLog.
+  /// @return false on error (without filling \a err if info is just missing).
+  bool LoadDepsFromLog(Edge* edge, TimeStamp* mtime, string* err);
+
+  /// Preallocate \a count spaces in the input array on \a edge, returning
+  /// an iterator pointing at the first new space.
+  vector<Node*>::iterator PreallocateSpace(Edge* edge, int count);
+
+  /// If we don't have a edge that generates this input already,
+  /// create one; this makes us not abort if the input is missing,
+  /// but instead will rebuild in that circumstance.
+  void CreatePhonyInEdge(Node* node);
+
+  State* state_;
+  DiskInterface* disk_interface_;
+  DepsLog* deps_log_;
+};
+
+
 /// DependencyScan manages the process of scanning the files in a graph
 /// and updating the dirty/outputs_ready state of all the nodes and edges.
 struct DependencyScan {
-  DependencyScan(State* state, BuildLog* build_log,
+  DependencyScan(State* state, BuildLog* build_log, DepsLog* deps_log,
                  DiskInterface* disk_interface)
-      : state_(state), build_log_(build_log),
-        disk_interface_(disk_interface) {}
+      : build_log_(build_log),
+        disk_interface_(disk_interface),
+        dep_loader_(state, deps_log, disk_interface) {}
 
   /// Examine inputs, outputs, and command lines to judge whether an edge
   /// needs to be re-run, and update outputs_ready_ and each outputs' |dirty_|
@@ -216,9 +243,8 @@ struct DependencyScan {
   /// Recompute whether a given single output should be marked dirty.
   /// Returns true if so.
   bool RecomputeOutputDirty(Edge* edge, Node* most_recent_input,
+                            TimeStamp deps_mtime,
                             const string& command, Node* output);
-
-  bool LoadDepFile(Edge* edge, string* err);
 
   BuildLog* build_log() const {
     return build_log_;
@@ -227,10 +253,14 @@ struct DependencyScan {
     build_log_ = log;
   }
 
+  DepsLog* deps_log() const {
+    return dep_loader_.deps_log();
+  }
+
  private:
-  State* state_;
   BuildLog* build_log_;
   DiskInterface* disk_interface_;
+  ImplicitDepLoader dep_loader_;
 };
 
 #endif  // NINJA_GRAPH_H_

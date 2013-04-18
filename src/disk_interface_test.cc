@@ -25,8 +25,7 @@
 
 namespace {
 
-class DiskInterfaceTest : public testing::Test {
- public:
+struct DiskInterfaceTest : public testing::Test {
   virtual void SetUp() {
     // These tests do real disk accesses, so create a temp dir.
     temp_dir_.CreateAndEnter("Ninja-DiskInterfaceTest");
@@ -105,7 +104,7 @@ TEST_F(DiskInterfaceTest, RemoveFile) {
 
 struct StatTest : public StateTestWithBuiltinRules,
                   public DiskInterface {
-  StatTest() : scan_(&state_, NULL, this) {}
+  StatTest() : scan_(&state_, NULL, NULL, this) {}
 
   // DiskInterface implementation.
   virtual TimeStamp Stat(const string& path);

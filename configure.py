@@ -47,9 +47,6 @@ parser.add_option('--with-gtest', metavar='PATH',
 parser.add_option('--with-python', metavar='EXE',
                   help='use EXE as the Python interpreter',
                   default=os.path.basename(sys.executable))
-parser.add_option('--with-ninja', metavar='NAME',
-                  help="name for ninja binary for -t msvc (MSVC only)",
-                  default="ninja")
 (options, args) = parser.parse_args()
 if args:
     print('ERROR: extra unparsed command-line arguments:', args)
@@ -130,6 +127,7 @@ if platform == 'windows':
               # We never have strings or arrays larger than 2**31.
               '/wd4267',
               '/DNOMINMAX', '/D_CRT_SECURE_NO_WARNINGS',
+              '/D_VARIADIC_MAX=10',
               '/DNINJA_PYTHON="%s"' % options.with_python]
     ldflags = ['/DEBUG', '/libpath:$builddir']
     if not options.debug:
@@ -168,10 +166,13 @@ else:
         cflags.append('-pg')
         ldflags.append('-pg')
     elif options.profile == 'pprof':
-        libs.append('-lprofiler')
+        cflags.append('-fno-omit-frame-pointer')
+        libs.extend(['-Wl,--no-as-needed', '-lprofiler'])
 
 def shell_escape(str):
-    """Escape str such that it's interpreted as a single argument by the shell."""
+    """Escape str such that it's interpreted as a single argument by
+    the shell."""
+
     # This isn't complete, but it's just enough to make NINJA_PYTHON work.
     if platform in ('windows', 'mingw'):
       return str
@@ -188,18 +189,15 @@ n.variable('ldflags', ' '.join(shell_escape(flag) for flag in ldflags))
 n.newline()
 
 if platform == 'windows':
-    compiler = '$cxx'
-    if options.with_ninja:
-        compiler = ('%s -t msvc -o $out -- $cxx /showIncludes' %
-                    options.with_ninja)
     n.rule('cxx',
-        command='%s $cflags -c $in /Fo$out' % compiler,
-        depfile='$out.d',
-        description='CXX $out')
+        command='$cxx /showIncludes $cflags -c $in /Fo$out',
+        description='CXX $out',
+        deps='msvc')
 else:
     n.rule('cxx',
         command='$cxx -MMD -MT $out -MF $out.d $cflags -c $in -o $out',
         depfile='$out.d',
+        deps='gcc',
         description='CXX $out')
 n.newline()
 
@@ -267,6 +265,7 @@ for name in ['build',
              'build_log',
              'clean',
              'depfile_parser',
+             'deps_log',
              'disk_interface',
              'edit_distance',
              'eval_env',
@@ -274,10 +273,12 @@ for name in ['build',
              'graph',
              'graphviz',
              'lexer',
+             'line_printer',
              'manifest_parser',
              'metrics',
              'state',
-             'util']:
+             'util',
+             'version']:
     objs += cxx(name)
 if platform in ('mingw', 'windows'):
     for name in ['subprocess-win32',
@@ -313,7 +314,7 @@ all_targets += ninja
 n.comment('Tests all build into ninja_test executable.')
 
 variables = []
-test_cflags = None
+test_cflags = cflags + ['-DGTEST_HAS_RTTI=0']
 test_ldflags = None
 test_libs = libs
 objs = []
@@ -322,37 +323,38 @@ if options.with_gtest:
 
     gtest_all_incs = '-I%s -I%s' % (path, os.path.join(path, 'include'))
     if platform == 'windows':
-        gtest_cflags = '/nologo /EHsc /Zi ' + gtest_all_incs
+        gtest_cflags = '/nologo /EHsc /Zi /D_VARIADIC_MAX=10 ' + gtest_all_incs
     else:
         gtest_cflags = '-fvisibility=hidden ' + gtest_all_incs
     objs += n.build(built('gtest-all' + objext), 'cxx',
                     os.path.join(path, 'src', 'gtest-all.cc'),
                     variables=[('cflags', gtest_cflags)])
-    objs += n.build(built('gtest_main' + objext), 'cxx',
-                    os.path.join(path, 'src', 'gtest_main.cc'),
-                    variables=[('cflags', gtest_cflags)])
 
-    test_cflags = cflags + ['-DGTEST_HAS_RTTI=0',
-                            '-I%s' % os.path.join(path, 'include')]
-elif platform == 'windows':
-    test_libs.extend(['gtest_main.lib', 'gtest.lib'])
+    test_cflags.append('-I%s' % os.path.join(path, 'include'))
 else:
-    test_libs.extend(['-lgtest_main', '-lgtest'])
+    # Use gtest from system.
+    if platform == 'windows':
+        test_libs.extend(['gtest_main.lib', 'gtest.lib'])
+    else:
+        test_libs.extend(['-lgtest_main', '-lgtest'])
 
+n.variable('test_cflags', test_cflags)
 for name in ['build_log_test',
              'build_test',
              'clean_test',
              'depfile_parser_test',
+             'deps_log_test',
              'disk_interface_test',
              'edit_distance_test',
              'graph_test',
              'lexer_test',
              'manifest_parser_test',
+             'ninja_test',
              'state_test',
              'subprocess_test',
              'test',
              'util_test']:
-    objs += cxx(name, variables=[('cflags', test_cflags)])
+    objs += cxx(name, variables=[('cflags', '$test_cflags')])
 if platform in ('windows', 'mingw'):
     for name in ['includes_normalize_test', 'msvc_helper_test']:
         objs += cxx(name, variables=[('cflags', test_cflags)])
@@ -392,9 +394,14 @@ n.newline()
 
 n.comment('Generate the manual using asciidoc.')
 n.rule('asciidoc',
-       command='asciidoc -a toc -a max-width=45em -o $out $in',
-       description='ASCIIDOC $in')
-manual = n.build(doc('manual.html'), 'asciidoc', doc('manual.asciidoc'))
+       command='asciidoc -b docbook -d book -o $out $in',
+       description='ASCIIDOC $out')
+n.rule('xsltproc',
+       command='xsltproc --nonet doc/docbook.xsl $in > $out',
+       description='XSLTPROC $out')
+xml = n.build(built('manual.xml'), 'asciidoc', doc('manual.asciidoc'))
+manual = n.build(doc('manual.html'), 'xsltproc', xml,
+                 implicit=doc('style.css'))
 n.build('manual', 'phony',
         order_only=manual)
 n.newline()

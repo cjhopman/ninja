@@ -25,8 +25,14 @@
 #include <vector>
 using namespace std;
 
+#ifdef _MSC_VER
+#define NORETURN __declspec(noreturn)
+#else
+#define NORETURN __attribute__((noreturn))
+#endif
+
 /// Log a fatal message and exit.
-void Fatal(const char* msg, ...);
+NORETURN void Fatal(const char* msg, ...);
 
 /// Log a warning message.
 void Warning(const char* msg, ...);
@@ -49,7 +55,8 @@ void SetCloseOnExec(int fd);
 
 /// Given a misspelled string and a list of correct spellings, returns
 /// the closest match or NULL if there is no close enough match.
-const char* SpellcheckStringV(const string& text, const vector<const char*>& words);
+const char* SpellcheckStringV(const string& text,
+                              const vector<const char*>& words);
 
 /// Like SpellcheckStringV, but takes a NULL-terminated list.
 const char* SpellcheckString(const string& text, ...);
@@ -75,6 +82,8 @@ string ElideMiddle(const string& str, size_t width);
 #define unlink _unlink
 #define chdir _chdir
 #define strtoull _strtoui64
+#define getcwd _getcwd
+#define PATH_MAX _MAX_PATH
 #endif
 
 #ifdef _WIN32
@@ -82,7 +91,7 @@ string ElideMiddle(const string& str, size_t width);
 string GetLastErrorString();
 
 /// Calls Fatal() with a function name and GetLastErrorString.
-void Win32Fatal(const char* function);
+NORETURN void Win32Fatal(const char* function);
 #endif
 
 #endif  // NINJA_UTIL_H_
