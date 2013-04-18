@@ -63,7 +63,7 @@ void PrintJson() {
       for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
         if (i != timing.begin()) out << ",\n";
         out << "    " << "\"" << (void*)i->first << "\": {\n";
-        out << "      " << "\"description\": \"" << i->first->GetDescription() << "\",\n";
+        out << "      " << "\"description\": \"" << i->first->GetBinding("description") << "\",\n";
         out << "      " << "\"triggered\": " << i->second.triggered << ",\n";
         out << "      " << "\"started\": " << i->second.started << ",\n";
         out << "      " << "\"finished\": " << i->second.finished << "\n";
