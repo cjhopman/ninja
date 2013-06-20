@@ -18,7 +18,7 @@
 #include "gtest/gtest.h"
 #include "line_printer.h"
 
-std::string StringPrintf(const char* format, ...) {
+string StringPrintf(const char* format, ...) {
   const int N = 1024;
   char buf[N];
 
@@ -31,8 +31,7 @@ std::string StringPrintf(const char* format, ...) {
 }
 
 /// A test result printer that's less wordy than gtest's default.
-class LaconicPrinter : public testing::EmptyTestEventListener {
- public:
+struct LaconicPrinter : public testing::EmptyTestEventListener {
   LaconicPrinter() : tests_started_(0), test_count_(0), iteration_(0) {}
   virtual void OnTestProgramStart(const testing::UnitTest& unit_test) {
     test_count_ = unit_test.test_to_run_count();

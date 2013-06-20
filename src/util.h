@@ -59,7 +59,7 @@ const char* SpellcheckStringV(const string& text,
                               const vector<const char*>& words);
 
 /// Like SpellcheckStringV, but takes a NULL-terminated list.
-const char* SpellcheckString(const string& text, ...);
+const char* SpellcheckString(const char* text, ...);
 
 /// Removes all Ansi escape codes (http://www.termsys.demon.co.uk/vtansi.htm).
 string StripAnsiEscapeCodes(const string& in);
@@ -75,6 +75,9 @@ double GetLoadAverage();
 /// Elide the given string @a str with '...' in the middle if the length
 /// exceeds @a width.
 string ElideMiddle(const string& str, size_t width);
+
+/// Truncates a file to the given size.
+bool Truncate(const string& path, size_t size, string* err);
 
 #ifdef _MSC_VER
 #define snprintf _snprintf

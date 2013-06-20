@@ -32,16 +32,28 @@
 const char kFileSignature[] = "# ninjadeps\n";
 const int kCurrentVersion = 1;
 
+// Since the size field is 2 bytes and the top bit marks deps entries, a single
+// record can be at most 32 kB. Set the buffer size to this and flush the file
+// buffer after every record to make sure records aren't written partially.
+const int kMaxBufferSize = 1 << 15;
+
 DepsLog::~DepsLog() {
   Close();
 }
 
 bool DepsLog::OpenForWrite(const string& path, string* err) {
+  if (needs_recompaction_) {
+    Close();
+    if (!Recompact(path, err))
+      return false;
+  }
+  
   file_ = fopen(path.c_str(), "ab");
   if (!file_) {
     *err = strerror(errno);
     return false;
   }
+  setvbuf(file_, NULL, _IOFBF, kMaxBufferSize);
   SetCloseOnExec(fileno(file_));
 
   // Opening a file in append mode doesn't set the file pointer to the file's
@@ -58,6 +70,7 @@ bool DepsLog::OpenForWrite(const string& path, string* err) {
       return false;
     }
   }
+  fflush(file_);
 
   return true;
 }
@@ -106,6 +119,7 @@ bool DepsLog::RecordDeps(Node* node, TimeStamp mtime,
   if (!made_change)
     return true;
 
+  // Update on-disk representation.
   uint16_t size = 4 * (1 + 1 + (uint16_t)node_count);
   size |= 0x8000;  // Deps record: set high bit.
   fwrite(&size, 2, 1, file_);
@@ -117,6 +131,13 @@ bool DepsLog::RecordDeps(Node* node, TimeStamp mtime,
     id = nodes[i]->id();
     fwrite(&id, 4, 1, file_);
   }
+  fflush(file_);
+
+  // Update in-memory representation.
+  Deps* deps = new Deps(mtime, node_count);
+  for (int i = 0; i < node_count; ++i)
+    deps->nodes[i] = nodes[i];
+  UpdateDeps(node->id(), deps);
 
   return true;
 }
@@ -152,15 +173,26 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
     return true;
   }
 
+  long offset;
+  bool read_failed = false;
+  int unique_dep_record_count = 0;
+  int total_dep_record_count = 0;
   for (;;) {
+    offset = ftell(f);
+
     uint16_t size;
-    if (fread(&size, 2, 1, f) < 1)
+    if (fread(&size, 2, 1, f) < 1) {
+      if (!feof(f))
+        read_failed = true;
       break;
+    }
     bool is_deps = (size >> 15) != 0;
     size = size & 0x7FFF;
 
-    if (fread(buf, size, 1, f) < 1)
+    if (fread(buf, size, 1, f) < 1) {
+      read_failed = true;
       break;
+    }
 
     if (is_deps) {
       assert(size % 4 == 0);
@@ -170,23 +202,16 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
       deps_data += 2;
       int deps_count = (size / 4) - 2;
 
-      Deps* deps = new Deps;
-      deps->mtime = mtime;
-      deps->node_count = deps_count;
-      deps->nodes = new Node*[deps_count];
+      Deps* deps = new Deps(mtime, deps_count);
       for (int i = 0; i < deps_count; ++i) {
         assert(deps_data[i] < (int)nodes_.size());
         assert(nodes_[deps_data[i]]);
         deps->nodes[i] = nodes_[deps_data[i]];
       }
 
-      if (out_id >= (int)deps_.size())
-        deps_.resize(out_id + 1);
-      if (deps_[out_id]) {
-        ++dead_record_count_;
-        delete deps_[out_id];
-      }
-      deps_[out_id] = deps;
+      total_dep_record_count++;
+      if (!UpdateDeps(out_id, deps))
+        ++unique_dep_record_count;
     } else {
       StringPiece path(buf, size);
       Node* node = state->GetNode(path);
@@ -195,16 +220,43 @@ bool DepsLog::Load(const string& path, State* state, string* err) {
       nodes_.push_back(node);
     }
   }
-  if (ferror(f)) {
-    *err = strerror(ferror(f));
-    return false;
+
+  if (read_failed) {
+    // An error occurred while loading; try to recover by truncating the
+    // file to the last fully-read record.
+    if (ferror(f)) {
+      *err = strerror(ferror(f));
+    } else {
+      *err = "premature end of file";
+    }
+    fclose(f);
+
+    if (!Truncate(path.c_str(), offset, err))
+      return false;
+
+    // The truncate succeeded; we'll just report the load error as a
+    // warning because the build can proceed.
+    *err += "; recovering";
+    return true;
   }
+
   fclose(f);
+
+  // Rebuild the log if there are too many dead records.
+  int kMinCompactionEntryCount = 1000;
+  int kCompactionRatio = 3;
+  if (total_dep_record_count > kMinCompactionEntryCount &&
+      total_dep_record_count > unique_dep_record_count * kCompactionRatio) {
+    needs_recompaction_ = true;
+  }
+
   return true;
 }
 
 DepsLog::Deps* DepsLog::GetDeps(Node* node) {
-  if (node->id() < 0)
+  // Abort if the node has no id (never referenced in the deps) or if
+  // there's no deps recorded for the node.
+  if (node->id() < 0 || node->id() >= (int)deps_.size())
     return NULL;
   return deps_[node->id()];
 }
@@ -214,19 +266,25 @@ bool DepsLog::Recompact(const string& path, string* err) {
   printf("Recompacting deps...\n");
 
   string temp_path = path + ".recompact";
+
+  // OpenForWrite() opens for append.  Make sure it's not appending to a
+  // left-over file from a previous recompaction attempt that crashed somehow.
+  unlink(temp_path.c_str());
+
   DepsLog new_log;
   if (!new_log.OpenForWrite(temp_path, err))
     return false;
 
-  // Clear all known ids so that new ones can be reassigned.
-  for (vector<Node*>::iterator i = nodes_.begin();
-       i != nodes_.end(); ++i) {
+  // Clear all known ids so that new ones can be reassigned.  The new indices
+  // will refer to the ordering in new_log, not in the current log.
+  for (vector<Node*>::iterator i = nodes_.begin(); i != nodes_.end(); ++i)
     (*i)->set_id(-1);
-  }
-
+  
   // Write out all deps again.
   for (int old_id = 0; old_id < (int)deps_.size(); ++old_id) {
     Deps* deps = deps_[old_id];
+    if (!deps) continue;  // If nodes_[old_id] is a leaf, it has no deps.
+
     if (!new_log.RecordDeps(nodes_[old_id], deps->mtime,
                             deps->node_count, deps->nodes)) {
       new_log.Close();
@@ -235,6 +293,10 @@ bool DepsLog::Recompact(const string& path, string* err) {
   }
 
   new_log.Close();
+
+  // All nodes now have ids that refer to new_log, so steal its data.
+  deps_.swap(new_log.deps_);
+  nodes_.swap(new_log.nodes_);
 
   if (unlink(path.c_str()) < 0) {
     *err = strerror(errno);
@@ -249,10 +311,22 @@ bool DepsLog::Recompact(const string& path, string* err) {
   return true;
 }
 
+bool DepsLog::UpdateDeps(int out_id, Deps* deps) {
+  if (out_id >= (int)deps_.size())
+    deps_.resize(out_id + 1);
+
+  bool delete_old = deps_[out_id] != NULL;
+  if (delete_old)
+    delete deps_[out_id];
+  deps_[out_id] = deps;
+  return delete_old;
+}
+
 bool DepsLog::RecordId(Node* node) {
   uint16_t size = (uint16_t)node->path().size();
   fwrite(&size, 2, 1, file_);
   fwrite(node->path().data(), node->path().size(), 1, file_);
+  fflush(file_);
 
   node->set_id(nodes_.size());
   nodes_.push_back(node);
