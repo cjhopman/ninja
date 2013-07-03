@@ -34,72 +34,7 @@
 #include "subprocess.h"
 #include "util.h"
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <set>
-#include <cmath>
-
 namespace {
-
-struct Timing {
-  int triggered;
-  int started;
-  int finished;
-};
-std::map<Edge*, std::set<Edge*> > inputs;
-std::map<Edge*, Edge*> triggered;
-std::map<Edge*, Timing> timing;
-int start_time_millis__;
-
-
-void PrintJson() {
-  std::ofstream out("dot.json");
-
-  out << "{\n";
-  {
-    out << "  " << "\"nodes\": {\n";
-    {
-      for (std::map<Edge*, Timing>::const_iterator i = timing.begin(); i != timing.end(); ++i) {
-        if (i != timing.begin()) out << ",\n";
-        out << "    " << "\"" << (void*)i->first << "\": {\n";
-        out << "      " << "\"description\": \"" << i->first->GetBinding("description") << "\",\n";
-        out << "      " << "\"triggered\": " << i->second.triggered << ",\n";
-        out << "      " << "\"started\": " << i->second.started << ",\n";
-        out << "      " << "\"finished\": " << i->second.finished << "\n";
-        out << "    " << "}";
-      }
-      out << "\n";
-    }
-    out << "  " << "},\n";
-    out << "  " << "\"triggered_by\": {\n";
-    {
-      for (std::map<Edge*, Edge*>::const_iterator i = triggered.begin(); i != triggered.end(); ++i) {
-        if (i != triggered.begin()) out << ",\n";
-        out << "    " << "\"" << (void*)i->first << "\": \"" << (void*)i->second << "\"";
-      }
-      out << "\n";
-    }
-    out << "  " << "},\n";
-    out << "  " << "\"inputs\": {\n";
-    {
-      for (std::map<Edge*, std::set<Edge*> >::const_iterator i = inputs.begin(); i != inputs.end(); ++i) {
-        if (i != inputs.begin()) out << ",\n";
-        out << "    " << "\"" << (void*)i->first << "\": [\n";
-        for (std::set<Edge*>::const_iterator j = i->second.begin(); j != i->second.end(); ++j) {
-          if (j != i->second.begin()) out << ",\n";
-          out << "      " << "\"" << (void*)(*j) << "\"";
-        }
-        out << "\n";
-        out << "    ]";
-      }
-      out << "\n";
-    }
-    out << "  " << "}\n";
-  }
-  out << "}\n";
-}
-
 
 /// A CommandRunner that doesn't actually run the commands.
 struct DryRunCommandRunner : public CommandRunner {
@@ -141,7 +76,6 @@ BuildStatus::BuildStatus(const BuildConfig& config)
       started_edges_(0), finished_edges_(0), total_edges_(0),
       progress_status_format_(NULL),
       overall_rate_(), current_rate_(config.parallelism) {
-  start_time_millis__ = start_time_millis_;
 
   // Don't do anything fancy in verbose mode.
   if (config_.verbosity != BuildConfig::NORMAL)
@@ -177,8 +111,6 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
   *end_time = (int)(now - start_time_millis_);
   running_edges_.erase(i);
 
-  timing[edge].started = *start_time;
-
   if (config_.verbosity == BuildConfig::QUIET)
     return;
 
@@ -212,7 +144,6 @@ void BuildStatus::BuildEdgeFinished(Edge* edge,
 }
 
 void BuildStatus::BuildFinished() {
-  PrintJson();
   printer_.PrintOnNewLine("");
 }
 
@@ -356,7 +287,6 @@ bool Plan::AddSubTarget(Node* node, vector<Node*>* stack, string* err) {
   if (node->dirty() && !want) {
     want = true;
     ++wanted_edges_;
-    timing[edge].triggered = GetTimeMillis() - start_time_millis__;
     if (edge->AllInputsReady())
       ScheduleWork(edge);
     if (!edge->is_phony())
@@ -436,7 +366,6 @@ void Plan::EdgeFinished(Edge* edge) {
     --wanted_edges_;
   want_.erase(i);
   edge->outputs_ready_ = true;
-  timing[edge].finished = GetTimeMillis() - start_time_millis__;
 
   // See if this job frees up any delayed jobs
   ResumeDelayedJobs(edge);
@@ -444,11 +373,11 @@ void Plan::EdgeFinished(Edge* edge) {
   // Check off any nodes we were waiting for with this edge.
   for (vector<Node*>::iterator i = edge->outputs_.begin();
        i != edge->outputs_.end(); ++i) {
-    NodeFinished(*i, edge);
+    NodeFinished(*i);
   }
 }
 
-void Plan::NodeFinished(Node* node, Edge* edge) {
+void Plan::NodeFinished(Node* node) {
   // See if we we want any edges from this node.
   for (vector<Edge*>::const_iterator i = node->out_edges().begin();
        i != node->out_edges().end(); ++i) {
@@ -456,11 +385,8 @@ void Plan::NodeFinished(Node* node, Edge* edge) {
     if (want_i == want_.end())
       continue;
 
-    inputs[*i].insert(edge);
     // See if the edge is now ready.
     if ((*i)->AllInputsReady()) {
-      triggered[*i] = edge;
-      timing[*i].triggered = GetTimeMillis() - start_time_millis__;
       if (want_i->second) {
         ScheduleWork(*i);
       } else {
